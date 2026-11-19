@@ -841,7 +841,7 @@ mod tests {
         VALID_TEXT.replace(
             "0x10: u32 = 42",
             &format!(
-                "0x10: pointer = {spelling}\n        0x11: list2[pointer] = {{ {spelling} 0x0 {{}} }}\n        0x12: string = \"Null is ordinary text\""
+                "0x10: pointer = {spelling}\n        0x11: list2[pointer] = {{ {spelling}, 0x0 {{}} }}\n        0x12: string = \"Null is ordinary text\""
             ),
         )
     }
