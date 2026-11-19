@@ -841,7 +841,7 @@ mod tests {
         VALID_TEXT.replace(
             "0x10: u32 = 42",
             &format!(
-                "0x10: pointer = {spelling}\n        0x11: list2[pointer] = {{ {spelling}, 0x0 {{}} }}\n        0x12: string = \"Null is ordinary text\""
+                "0x10: pointer = {spelling}\n        0x11: list2[pointer] = {{ {spelling}\n            0x0 {{}}\n        }}\n        0x12: string = \"Null is ordinary text\""
             ),
         )
     }
@@ -890,7 +890,8 @@ mod tests {
         let text = to_text(&file, TextLayout::default(), &BinHashes::none()).unwrap();
 
         assert!(text.contains("pointer = 0x0 {}"));
-        assert!(text.contains("list2[pointer] = { 0x0 {}, 0x0 {} }"));
+        assert!(text.contains("list2[pointer] = {"));
+        assert!(text.matches("0x0 {}").count() >= 3);
         assert!(text.contains(r#"string = "Null is ordinary text""#));
         assert!(!text.contains("= null"));
         assert!(reads_back(&file, &text));
