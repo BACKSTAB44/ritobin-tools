@@ -1063,7 +1063,7 @@ mod tests {
         );
         let normalized = remove_list2_pointer_commas(text);
 
-        assert!(normalized.contains("0x0 {}  0x1 {"));
+        assert!(normalized.contains("0x0 {} 0x1 {"));
         assert!(normalized.contains("list[u32] = { 1, 2 }"));
         assert!(normalized.contains(r#"string = "a,b""#));
         assert!(normalized.contains(r#"string = "list2[pointer] = { 0x0 {}, 0x1 {} }""#));
