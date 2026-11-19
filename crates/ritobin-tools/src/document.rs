@@ -418,6 +418,9 @@ pub fn to_text(
         text = normalized;
     }
 
+    // Match Moonshadow's canonical zero-class pointer representation.
+    text = print_null_literals_as_zero_struct(&text);
+
     if !text.ends_with('\n') {
         text.push('\n');
     }
@@ -431,11 +434,12 @@ pub fn to_text(
 /// `convert` and `diff` use this function to verify text printed from a bin, and warn on a
 /// mismatch.
 pub fn reads_back(file: &BinFile, text: &str) -> bool {
-    let cst = Cst::parse(text);
+    let normalized_text = normalize_null_literals(text);
+    let cst = Cst::parse(&normalized_text);
     if !cst.errors.is_empty() {
         return false;
     }
-    let (parsed, diagnostics) = cst.build(text);
+    let (parsed, diagnostics) = cst.build(&normalized_text);
     if !diagnostics.is_empty() {
         return false;
     }
@@ -516,13 +520,90 @@ struct TextProblems {
     help: Option<String>,
 }
 
+/// Rewrites bare, unquoted null spellings to the lowercase keyword recognized by
+/// ltk_ritobin. Quoted strings and comments are copied byte-for-byte. The replacement has the
+/// same length, so parser spans continue to refer to the original source positions.
+fn rewrite_null_literals(text: &str, replacement: &str) -> String {
+    fn is_name_byte(byte: u8) -> bool {
+        byte == b'_' || byte.is_ascii_alphanumeric()
+    }
+
+    let bytes = text.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut cursor = 0;
+    let mut quote = None;
+
+    while cursor < bytes.len() {
+        let byte = bytes[cursor];
+
+        if let Some(quote_byte) = quote {
+            output.push(byte);
+            cursor += 1;
+
+            if byte == b'\\' && cursor < bytes.len() {
+                output.push(bytes[cursor]);
+                cursor += 1;
+            } else if byte == quote_byte {
+                quote = None;
+            }
+            continue;
+        }
+
+        match byte {
+            b'"' | b'\'' => {
+                quote = Some(byte);
+                output.push(byte);
+                cursor += 1;
+            }
+            b'#' => {
+                while cursor < bytes.len() {
+                    let current = bytes[cursor];
+                    output.push(current);
+                    cursor += 1;
+                    if matches!(current, b'\n' | b'\r') {
+                        break;
+                    }
+                }
+            }
+            byte if is_name_byte(byte) => {
+                let start = cursor;
+                while cursor < bytes.len() && is_name_byte(bytes[cursor]) {
+                    cursor += 1;
+                }
+                let token = &bytes[start..cursor];
+                if token.eq_ignore_ascii_case(b"null") {
+                    output.extend_from_slice(replacement.as_bytes());
+                } else {
+                    output.extend_from_slice(token);
+                }
+            }
+            _ => {
+                output.push(byte);
+                cursor += 1;
+            }
+        }
+    }
+
+    String::from_utf8(output).expect("rewriting ASCII Ritobin keywords preserves UTF-8")
+}
+
+/// Normalizes external converter spellings such as Null and NULL for the parser.
+fn normalize_null_literals(text: &str) -> String {
+    rewrite_null_literals(text, "null")
+}
+
+/// Prints null pointer literals using the canonical zero-struct spelling.
+fn print_null_literals_as_zero_struct(text: &str) -> String {
+    rewrite_null_literals(text, "0x0 {}")
+}
+
 /// Parses ritobin text into a bin document. Fails if the text has a syntax error or a build
-/// diagnostic other than a shadowed entry. If `options.lenient` is set, these problems are
+/// diagnostic other than a shadowed entry. If options.lenient is set, these problems are
 /// printed as warnings and the parse succeeds.
 fn parse_text(name: &str, text: String, options: ReadOptions) -> Result<BinFile> {
-    let cst = Cst::parse(&text);
-    let (file, diagnostics) = cst.build(&text);
-
+    let normalized_text = normalize_null_literals(&text);
+    let cst = Cst::parse(&normalized_text);
+    let (file, diagnostics) = cst.build(&normalized_text);
     let mut errors: Vec<TextProblem> = cst
         .errors
         .iter()
@@ -566,8 +647,9 @@ fn parse_text(name: &str, text: String, options: ReadOptions) -> Result<BinFile>
 /// Fails if the text has a syntax error or a build diagnostic other than a shadowed entry. Fails
 /// if the formatted text does not parse to the same document as `text`.
 pub fn format_text(name: &str, text: &str, layout: TextLayout) -> Result<String> {
-    let cst = Cst::parse(text);
-    let (file, diagnostics) = cst.build(text);
+    let normalized_text = normalize_null_literals(text);
+    let cst = Cst::parse(&normalized_text);
+    let (file, diagnostics) = cst.build(&normalized_text);
     let errors: Vec<TextProblem> = cst
         .errors
         .iter()
@@ -754,6 +836,66 @@ mod tests {
     }
 
     const VALID_TEXT: &str = "#PROP_text\ntype: string = \"PROP\"\nversion: u32 = 3\nlinked: list[string] = { }\nentries: map[hash, embed] = {\n    0x1 = 0x2 {\n        0x10: u32 = 42\n    }\n}\n";
+    
+    fn text_with_null_spelling(spelling: &str) -> String {
+        VALID_TEXT.replace(
+            "0x10: u32 = 42",
+            &format!(
+                "0x10: pointer = {spelling}\n        0x11: list2[pointer] = {{ {spelling} 0x0 {{}} }}\n        0x12: string = \"Null is ordinary text\""
+            ),
+        )
+    }
+
+    #[test]
+    fn parses_null_spellings_for_pointers_and_list2() {
+        let canonical = Document::parse(
+            "canonical.rito",
+            text_with_null_spelling("null").into(),
+            ReadOptions::default(),
+        )
+        .unwrap()
+        .file;
+
+        for spelling in ["Null", "NULL", "0x0 {}", "0x00000000 {}"] {
+            let parsed = Document::parse(
+                "alternate.rito",
+                text_with_null_spelling(spelling).into(),
+                ReadOptions::default(),
+            )
+            .unwrap()
+            .file;
+            assert_eq!(to_bin(&parsed).unwrap(), to_bin(&canonical).unwrap(), "{spelling}");
+        }
+    }
+
+    #[test]
+    fn null_normalization_preserves_strings_and_comments() {
+        let text = r#"0x10: string = "Null null" # Null in a comment
+0x11: pointer = Null
+"#;
+        let normalized = normalize_null_literals(text);
+        assert!(normalized.contains(r#"string = "Null null" # Null in a comment"#));
+        assert!(normalized.contains("pointer = null"));
+    }
+
+    #[test]
+    fn output_uses_zero_struct_spelling_for_null_pointers() {
+        let file = Document::parse(
+            "null-pointer.rito",
+            text_with_null_spelling("Null").into(),
+            ReadOptions::default(),
+        )
+        .unwrap()
+        .file;
+        let text = to_text(&file, TextLayout::default(), &BinHashes::none()).unwrap();
+
+        assert!(text.contains("pointer = 0x0 {}"));
+        assert!(text.contains("list2[pointer] = { 0x0 {}, 0x0 {} }"));
+        assert!(text.contains(r#"string = "Null is ordinary text""#));
+        assert!(!text.contains("= null"));
+        assert!(reads_back(&file, &text));
+    }
+
 
     #[test]
     fn parse_fails_on_syntax_error() {
