@@ -1031,7 +1031,7 @@ impl Row {
                     }
                     None => named,
                 });
-                row.value_type = Some(RitoType::new(*kind, subtypes).to_string());
+                row.value_type = Some(RitoType::from_parts(*kind, subtypes).to_string());
                 match shown {
                     // The owned tree does not fail to decode a leaf.
                     Shown::Leaf(value) => {
