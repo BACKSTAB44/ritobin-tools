@@ -520,9 +520,8 @@ struct TextProblems {
     help: Option<String>,
 }
 
-/// Rewrites bare, unquoted null spellings to the lowercase keyword recognized by
-/// ltk_ritobin. Quoted strings and comments are copied byte-for-byte. The replacement has the
-/// same length, so parser spans continue to refer to the original source positions.
+/// Rewrites bare, unquoted null tokens outside quoted strings and comments. All other source
+/// bytes are copied unchanged.
 fn rewrite_null_literals(text: &str, replacement: &str) -> String {
     fn is_name_byte(byte: u8) -> bool {
         byte == b'_' || byte.is_ascii_alphanumeric()
@@ -587,7 +586,8 @@ fn rewrite_null_literals(text: &str, replacement: &str) -> String {
     String::from_utf8(output).expect("rewriting ASCII Ritobin keywords preserves UTF-8")
 }
 
-/// Normalizes external converter spellings such as Null and NULL for the parser.
+/// Normalizes external converter spellings such as Null and NULL for the parser. The replacement
+/// is the same length as the original token, so source spans remain valid.
 fn normalize_null_literals(text: &str) -> String {
     rewrite_null_literals(text, "null")
 }
@@ -864,7 +864,11 @@ mod tests {
             )
             .unwrap()
             .file;
-            assert_eq!(to_bin(&parsed).unwrap(), to_bin(&canonical).unwrap(), "{spelling}");
+            assert_eq!(
+                to_bin(&parsed).unwrap(),
+                to_bin(&canonical).unwrap(),
+                "{spelling}"
+            );
         }
     }
 
