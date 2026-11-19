@@ -418,6 +418,14 @@ pub fn to_text(
         text = normalized;
     }
 
+    // Match Moonshadow's canonical zero-class pointer representation.
+    text = print_null_literals_as_zero_struct(&text);
+    // The parser treats pointer-list elements as class blocks and does not consume commas
+    // after them. Separate list2[pointer] class items by whitespace instead.
+    text = remove_list2_pointer_commas(&text);
+    // Keep the compact hexadecimal notation used by earlier ritobin-tools versions.
+    text = normalize_hash_padding(&text);
+
     if !text.ends_with('\n') {
         text.push('\n');
     }
@@ -431,11 +439,12 @@ pub fn to_text(
 /// `convert` and `diff` use this function to verify text printed from a bin, and warn on a
 /// mismatch.
 pub fn reads_back(file: &BinFile, text: &str) -> bool {
-    let cst = Cst::parse(text);
+    let normalized_text = normalize_null_literals(text);
+    let cst = Cst::parse(&normalized_text);
     if !cst.errors.is_empty() {
         return false;
     }
-    let (parsed, diagnostics) = cst.build(text);
+    let (parsed, diagnostics) = cst.build(&normalized_text);
     if !diagnostics.is_empty() {
         return false;
     }
@@ -516,13 +525,290 @@ struct TextProblems {
     help: Option<String>,
 }
 
+/// Rewrites bare, unquoted null tokens outside quoted strings and comments. All other source
+/// bytes are copied unchanged.
+fn rewrite_null_literals(text: &str, replacement: &str) -> String {
+    fn is_name_byte(byte: u8) -> bool {
+        byte == b'_' || byte.is_ascii_alphanumeric()
+    }
+
+    let bytes = text.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut cursor = 0;
+    let mut quote = None;
+
+    while cursor < bytes.len() {
+        let byte = bytes[cursor];
+
+        if let Some(quote_byte) = quote {
+            output.push(byte);
+            cursor += 1;
+
+            if byte == b'\\' && cursor < bytes.len() {
+                output.push(bytes[cursor]);
+                cursor += 1;
+            } else if byte == quote_byte {
+                quote = None;
+            }
+            continue;
+        }
+
+        match byte {
+            b'"' | b'\'' => {
+                quote = Some(byte);
+                output.push(byte);
+                cursor += 1;
+            }
+            b'#' => {
+                while cursor < bytes.len() {
+                    let current = bytes[cursor];
+                    output.push(current);
+                    cursor += 1;
+                    if matches!(current, b'\n' | b'\r') {
+                        break;
+                    }
+                }
+            }
+            byte if is_name_byte(byte) => {
+                let start = cursor;
+                while cursor < bytes.len() && is_name_byte(bytes[cursor]) {
+                    cursor += 1;
+                }
+                let token = &bytes[start..cursor];
+                if token.eq_ignore_ascii_case(b"null") {
+                    output.extend_from_slice(replacement.as_bytes());
+                } else {
+                    output.extend_from_slice(token);
+                }
+            }
+            _ => {
+                output.push(byte);
+                cursor += 1;
+            }
+        }
+    }
+
+    String::from_utf8(output).expect("rewriting ASCII Ritobin keywords preserves UTF-8")
+}
+
+/// Normalizes external converter spellings such as Null and NULL for the parser. The replacement
+/// is the same length as the original token, so source spans remain valid.
+fn normalize_null_literals(text: &str) -> String {
+    rewrite_null_literals(text, "null")
+}
+
+/// Prints null pointer literals using the canonical zero-struct spelling.
+fn print_null_literals_as_zero_struct(text: &str) -> String {
+    rewrite_null_literals(text, "0x0 {}")
+}
+
+/// Removes separators between top-level items in `list2[pointer]` values.
+///
+/// The parser handles a pointer element as a class block (`0xHASH { ... }`). Unlike its
+/// literal-item branch, the class-item branch does not consume a following comma. The printer
+/// can inline these lists with commas, so remove only commas at the list's outermost level.
+/// Commas in nested values, strings, and comments are preserved.
+fn remove_list2_pointer_commas(text: &str) -> String {
+    fn skip_quoted(bytes: &[u8], mut cursor: usize) -> usize {
+        let quote = bytes[cursor];
+        cursor += 1;
+        while cursor < bytes.len() {
+            if bytes[cursor] == b'\\' {
+                cursor = (cursor + 2).min(bytes.len());
+            } else if bytes[cursor] == quote {
+                return cursor + 1;
+            } else {
+                cursor += 1;
+            }
+        }
+        cursor
+    }
+
+    fn skip_comment(bytes: &[u8], mut cursor: usize) -> usize {
+        while cursor < bytes.len() && !matches!(bytes[cursor], b'\n' | b'\r') {
+            cursor += 1;
+        }
+        cursor
+    }
+
+    fn matching_brace(bytes: &[u8], open: usize) -> Option<usize> {
+        let mut depth = 0usize;
+        let mut cursor = open;
+        while cursor < bytes.len() {
+            match bytes[cursor] {
+                b'"' | b'\'' => cursor = skip_quoted(bytes, cursor),
+                b'#' => cursor = skip_comment(bytes, cursor),
+                b'{' => {
+                    depth += 1;
+                    cursor += 1;
+                }
+                b'}' => {
+                    depth = depth.checked_sub(1)?;
+                    if depth == 0 {
+                        return Some(cursor);
+                    }
+                    cursor += 1;
+                }
+                _ => cursor += 1,
+            }
+        }
+        None
+    }
+
+    let bytes = text.as_bytes();
+    let marker = b"list2[pointer]";
+    let mut ranges = Vec::new();
+    let mut cursor = 0usize;
+
+    // Find every list2[pointer] initializer, ignoring strings and comments. Continue scanning
+    // inside each initializer so nested list2[pointer] fields are found too.
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'"' | b'\'' => cursor = skip_quoted(bytes, cursor),
+            b'#' => cursor = skip_comment(bytes, cursor),
+            _ if bytes[cursor..].starts_with(marker) => {
+                let mut next = cursor + marker.len();
+                while next < bytes.len() && bytes[next].is_ascii_whitespace() {
+                    next += 1;
+                }
+                if next < bytes.len() && bytes[next] == b'=' {
+                    next += 1;
+                    while next < bytes.len() && bytes[next].is_ascii_whitespace() {
+                        next += 1;
+                    }
+                    if next < bytes.len() && bytes[next] == b'{' {
+                        if let Some(close) = matching_brace(bytes, next) {
+                            ranges.push((next, close));
+                        }
+                    }
+                }
+                cursor += marker.len();
+            }
+            _ => cursor += 1,
+        }
+    }
+
+    if ranges.is_empty() {
+        return text.to_owned();
+    }
+
+    let mut remove = vec![false; bytes.len()];
+    for (open, close) in ranges {
+        let mut depth = 1usize;
+        let mut cursor = open + 1;
+        while cursor < close {
+            match bytes[cursor] {
+                b'"' | b'\'' => cursor = skip_quoted(bytes, cursor),
+                b'#' => cursor = skip_comment(bytes, cursor),
+                b'{' => {
+                    depth += 1;
+                    cursor += 1;
+                }
+                b'}' => {
+                    depth = depth.saturating_sub(1);
+                    cursor += 1;
+                }
+                b',' if depth == 1 => {
+                    remove[cursor] = true;
+                    cursor += 1;
+                }
+                _ => cursor += 1,
+            }
+        }
+    }
+
+    let mut output = Vec::with_capacity(bytes.len());
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        if !remove[index] {
+            output.push(byte);
+        }
+    }
+    String::from_utf8(output).expect("removing ASCII commas preserves UTF-8")
+}
+
+/// Removes padding from 32-bit hexadecimal literals, matching the established ritobin text
+/// style. 64-bit hash literals retain all 16 digits. Strings and comments are left unchanged.
+fn normalize_hash_padding(text: &str) -> String {
+    fn is_hex(byte: u8) -> bool {
+        byte.is_ascii_hexdigit()
+    }
+
+    let bytes = text.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut cursor = 0;
+    let mut quote = None;
+
+    while cursor < bytes.len() {
+        let byte = bytes[cursor];
+
+        if let Some(quote_byte) = quote {
+            output.push(byte);
+            cursor += 1;
+
+            if byte == b'\\' && cursor < bytes.len() {
+                output.push(bytes[cursor]);
+                cursor += 1;
+            } else if byte == quote_byte {
+                quote = None;
+            }
+            continue;
+        }
+
+        match byte {
+            b'"' | b'\'' => {
+                quote = Some(byte);
+                output.push(byte);
+                cursor += 1;
+            }
+            b'#' => {
+                while cursor < bytes.len() {
+                    let current = bytes[cursor];
+                    output.push(current);
+                    cursor += 1;
+                    if matches!(current, b'\n' | b'\r') {
+                        break;
+                    }
+                }
+            }
+            b'0' if cursor + 2 < bytes.len()
+                && matches!(bytes[cursor + 1], b'x' | b'X')
+                && is_hex(bytes[cursor + 2]) =>
+            {
+                let start = cursor;
+                cursor += 2;
+                let digits_start = cursor;
+                while cursor < bytes.len() && is_hex(bytes[cursor]) {
+                    cursor += 1;
+                }
+                let digits = &bytes[digits_start..cursor];
+                if digits.len() <= 8 {
+                    let first_nonzero = digits.iter().position(|digit| *digit != b'0');
+                    output.extend_from_slice(b"0x");
+                    match first_nonzero {
+                        Some(index) => output.extend_from_slice(&digits[index..]),
+                        None => output.push(b'0'),
+                    }
+                } else {
+                    output.extend_from_slice(&bytes[start..cursor]);
+                }
+            }
+            _ => {
+                output.push(byte);
+                cursor += 1;
+            }
+        }
+    }
+
+    String::from_utf8(output).expect("normalizing ASCII hexadecimal literals preserves UTF-8")
+}
+
 /// Parses ritobin text into a bin document. Fails if the text has a syntax error or a build
-/// diagnostic other than a shadowed entry. If `options.lenient` is set, these problems are
+/// diagnostic other than a shadowed entry. If options.lenient is set, these problems are
 /// printed as warnings and the parse succeeds.
 fn parse_text(name: &str, text: String, options: ReadOptions) -> Result<BinFile> {
-    let cst = Cst::parse(&text);
-    let (file, diagnostics) = cst.build(&text);
-
+    let normalized_text = normalize_null_literals(&text);
+    let cst = Cst::parse(&normalized_text);
+    let (file, diagnostics) = cst.build(&normalized_text);
     let mut errors: Vec<TextProblem> = cst
         .errors
         .iter()
@@ -566,8 +852,9 @@ fn parse_text(name: &str, text: String, options: ReadOptions) -> Result<BinFile>
 /// Fails if the text has a syntax error or a build diagnostic other than a shadowed entry. Fails
 /// if the formatted text does not parse to the same document as `text`.
 pub fn format_text(name: &str, text: &str, layout: TextLayout) -> Result<String> {
-    let cst = Cst::parse(text);
-    let (file, diagnostics) = cst.build(text);
+    let normalized_text = normalize_null_literals(text);
+    let cst = Cst::parse(&normalized_text);
+    let (file, diagnostics) = cst.build(&normalized_text);
     let errors: Vec<TextProblem> = cst
         .errors
         .iter()
@@ -754,6 +1041,107 @@ mod tests {
     }
 
     const VALID_TEXT: &str = "#PROP_text\ntype: string = \"PROP\"\nversion: u32 = 3\nlinked: list[string] = { }\nentries: map[hash, embed] = {\n    0x1 = 0x2 {\n        0x10: u32 = 42\n    }\n}\n";
+    
+    fn text_with_null_spelling(spelling: &str) -> String {
+        VALID_TEXT.replace(
+            "0x10: u32 = 42",
+            &format!(
+                "0x10: pointer = {spelling}\n        0x11: list2[pointer] = {{ {spelling}\n            0x0 {{}}\n        }}\n        0x12: string = \"Null is ordinary text\""
+            ),
+        )
+    }
+
+    #[test]
+    fn removes_only_top_level_list2_pointer_commas() {
+        let text = concat!(
+            "0x10: list2[pointer] = { 0x0 {}, 0x1 { ",
+            "0x20: list[u32] = { 1, 2 }\n",
+            "0x21: string = \"a,b\"\n",
+            "} }\n",
+            "0x11: string = \"list2[pointer] = { 0x0 {}, 0x1 {} }\"\n",
+            "# list2[pointer] = { 0x0 {}, 0x1 {} }\n",
+        );
+        let normalized = remove_list2_pointer_commas(text);
+
+        assert!(normalized.contains("0x0 {} 0x1 {"));
+        assert!(normalized.contains("list[u32] = { 1, 2 }"));
+        assert!(normalized.contains(r#"string = "a,b""#));
+        assert!(normalized.contains(r#"string = "list2[pointer] = { 0x0 {}, 0x1 {} }""#));
+        assert!(normalized.contains("# list2[pointer] = { 0x0 {}, 0x1 {} }"));
+    }
+
+    #[test]
+    fn parses_null_spellings_for_pointers_and_list2() {
+        let canonical = Document::parse(
+            "canonical.rito",
+            text_with_null_spelling("null").into(),
+            ReadOptions::default(),
+        )
+        .unwrap()
+        .file;
+
+        for spelling in ["Null", "NULL", "0x0 {}", "0x00000000 {}"] {
+            let parsed = Document::parse(
+                "alternate.rito",
+                text_with_null_spelling(spelling).into(),
+                ReadOptions::default(),
+            )
+            .unwrap()
+            .file;
+            assert_eq!(
+                to_bin(&parsed).unwrap(),
+                to_bin(&canonical).unwrap(),
+                "{spelling}"
+            );
+        }
+    }
+
+    #[test]
+    fn null_normalization_preserves_strings_and_comments() {
+        let text = r#"0x10: string = "Null null" # Null in a comment
+0x11: pointer = Null
+"#;
+        let normalized = normalize_null_literals(text);
+        assert!(normalized.contains(r#"string = "Null null" # Null in a comment"#));
+        assert!(normalized.contains("pointer = null"));
+    }
+
+    #[test]
+    fn output_uses_zero_struct_spelling_for_null_pointers() {
+        let file = Document::parse(
+            "null-pointer.rito",
+            text_with_null_spelling("Null").into(),
+            ReadOptions::default(),
+        )
+        .unwrap()
+        .file;
+        let text = to_text(&file, TextLayout::default(), &BinHashes::none()).unwrap();
+
+        assert!(text.contains("pointer = 0x0 {}"));
+        assert!(text.contains("list2[pointer] = {"));
+        assert!(text.matches("0x0 {}").count() >= 3);
+        assert!(text.contains(r#"string = "Null is ordinary text""#));
+        assert!(!text.contains("= null"));
+        let normalized = normalize_null_literals(&text);
+        let cst = Cst::parse(&normalized);
+        assert!(
+            cst.errors.is_empty(),
+            "Printed text has syntax errors:\n{text}\n{:?}",
+            cst.errors
+        );
+        let (parsed, diagnostics) = cst.build(&normalized);
+        assert!(
+            diagnostics.is_empty(),
+            "Printed text has build diagnostics:\n{text}\n{:?}",
+            diagnostics
+        );
+        assert_eq!(
+            to_bin(&file).unwrap(),
+            to_bin(&parsed).unwrap(),
+            "Printed text changed the binary representation:\n{text}"
+        );
+    }
+
 
     #[test]
     fn parse_fails_on_syntax_error() {

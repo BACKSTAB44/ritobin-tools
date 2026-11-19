@@ -968,15 +968,14 @@ dependencies = [
 
 [[package]]
 name = "ltk_hash"
-version = "0.5.1"
+version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63c57a6d50b0b2a0e4121f791508d8a999ad6c92d3c78a547da119054c802b6a"
+checksum = "f657f615bd5693c102d0315ca4a58357984464d20519424da8fd84294ec075dc"
 dependencies = [
  "byteorder",
  "serde",
  "xxhash-rust",
 ]
-
 [[package]]
 name = "ltk_hashdb"
 version = "0.1.0"
@@ -1004,21 +1003,20 @@ dependencies = [
 
 [[package]]
 name = "ltk_io_ext"
-version = "0.4.9"
+version = "0.4.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb7d8109559ce8fd5c364be0c793d51f658a6c2d5afb35ffb8b8ce7f8731d3b7"
+checksum = "6ff7fe619ba993ae8cc2ca34f653bc18a200d6f9221dab7bab3a27e4739d598e"
 dependencies = [
  "byteorder",
  "glam",
  "ltk_primitives",
  "thiserror 1.0.69",
 ]
-
 [[package]]
 name = "ltk_meta"
-version = "0.9.1"
+version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bdb750a2336b1a5055b330cda2e9d9c26a0c8c95cabaa4b90792857e8cce048e"
+checksum = "1bbb017220809a13e51c064fbcd37e93f00faa8dd9dfc1a954850289a36ce787"
 dependencies = [
  "byteorder",
  "enum_dispatch",
@@ -1034,7 +1032,6 @@ dependencies = [
  "serde",
  "thiserror 1.0.69",
 ]
-
 [[package]]
 name = "ltk_mimir_cache"
 version = "0.1.0"
@@ -1074,21 +1071,20 @@ dependencies = [
 
 [[package]]
 name = "ltk_primitives"
-version = "0.3.8"
+version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d2ec61599fb7ad880c5b7febc317c52cc0b2aa3d18367437af007796f2ac85b"
+checksum = "15f489895c23015bd9eeed05ee362bd12decf8ca863c3e5b06541f011a66fc6b"
 dependencies = [
  "byteorder",
  "glam",
  "serde",
  "thiserror 1.0.69",
 ]
-
 [[package]]
 name = "ltk_ritobin"
-version = "0.11.0"
+version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e1d01ad6b07fb960e907bd2b7c153c0956986086c1c7b142ea18a9377907c56"
+checksum = "909f9d140ed08b906794e2f095a3ab2566b650a48f4ad520313dbf78eb420e35"
 dependencies = [
  "glam",
  "indexmap",
@@ -1104,7 +1100,6 @@ dependencies = [
  "thiserror 1.0.69",
  "xxhash-rust",
 ]
-
 [[package]]
 name = "ltk_wad"
 version = "0.5.9"
@@ -1609,7 +1604,7 @@ dependencies = [
 
 [[package]]
 name = "ritobin-tools"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "assert_cmd",
  "camino",
