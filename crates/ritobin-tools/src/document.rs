@@ -420,6 +420,8 @@ pub fn to_text(
 
     // Match Moonshadow's canonical zero-class pointer representation.
     text = print_null_literals_as_zero_struct(&text);
+    // Keep the compact hexadecimal notation used by earlier ritobin-tools versions.
+    text = normalize_hash_padding(&text);
 
     if !text.ends_with('\n') {
         text.push('\n');
@@ -595,6 +597,82 @@ fn normalize_null_literals(text: &str) -> String {
 /// Prints null pointer literals using the canonical zero-struct spelling.
 fn print_null_literals_as_zero_struct(text: &str) -> String {
     rewrite_null_literals(text, "0x0 {}")
+}
+
+/// Removes padding from 32-bit hexadecimal literals, matching the established ritobin text
+/// style. 64-bit hash literals retain all 16 digits. Strings and comments are left unchanged.
+fn normalize_hash_padding(text: &str) -> String {
+    fn is_hex(byte: u8) -> bool {
+        byte.is_ascii_hexdigit()
+    }
+
+    let bytes = text.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut cursor = 0;
+    let mut quote = None;
+
+    while cursor < bytes.len() {
+        let byte = bytes[cursor];
+
+        if let Some(quote_byte) = quote {
+            output.push(byte);
+            cursor += 1;
+
+            if byte == b'\\' && cursor < bytes.len() {
+                output.push(bytes[cursor]);
+                cursor += 1;
+            } else if byte == quote_byte {
+                quote = None;
+            }
+            continue;
+        }
+
+        match byte {
+            b'"' | b'\\'' => {
+                quote = Some(byte);
+                output.push(byte);
+                cursor += 1;
+            }
+            b'#' => {
+                while cursor < bytes.len() {
+                    let current = bytes[cursor];
+                    output.push(current);
+                    cursor += 1;
+                    if matches!(current, b'\\n' | b'\\r') {
+                        break;
+                    }
+                }
+            }
+            b'0' if cursor + 2 < bytes.len()
+                && matches!(bytes[cursor + 1], b'x' | b'X')
+                && is_hex(bytes[cursor + 2]) =>
+            {
+                let start = cursor;
+                cursor += 2;
+                let digits_start = cursor;
+                while cursor < bytes.len() && is_hex(bytes[cursor]) {
+                    cursor += 1;
+                }
+                let digits = &bytes[digits_start..cursor];
+                if digits.len() <= 8 {
+                    let first_nonzero = digits.iter().position(|digit| *digit != b'0');
+                    output.extend_from_slice(b"0x");
+                    match first_nonzero {
+                        Some(index) => output.extend_from_slice(&digits[index..]),
+                        None => output.push(b'0'),
+                    }
+                } else {
+                    output.extend_from_slice(&bytes[start..cursor]);
+                }
+            }
+            _ => {
+                output.push(byte);
+                cursor += 1;
+            }
+        }
+    }
+
+    String::from_utf8(output).expect("normalizing ASCII hexadecimal literals preserves UTF-8")
 }
 
 /// Parses ritobin text into a bin document. Fails if the text has a syntax error or a build
@@ -898,7 +976,24 @@ mod tests {
         assert!(text.matches("0x0 {}").count() >= 3);
         assert!(text.contains(r#"string = "Null is ordinary text""#));
         assert!(!text.contains("= null"));
-        assert!(reads_back(&file, &text));
+        let normalized = normalize_null_literals(&text);
+        let cst = Cst::parse(&normalized);
+        assert!(
+            cst.errors.is_empty(),
+            "Printed text has syntax errors:\n{text}\n{:?}",
+            cst.errors
+        );
+        let (parsed, diagnostics) = cst.build(&normalized);
+        assert!(
+            diagnostics.is_empty(),
+            "Printed text has build diagnostics:\n{text}\n{:?}",
+            diagnostics
+        );
+        assert_eq!(
+            to_bin(&file).unwrap(),
+            to_bin(&parsed).unwrap(),
+            "Printed text changed the binary representation:\n{text}"
+        );
     }
 
 
