@@ -1052,6 +1052,25 @@ mod tests {
     }
 
     #[test]
+    fn removes_only_top_level_list2_pointer_commas() {
+        let text = concat!(
+            "0x10: list2[pointer] = { 0x0 {}, 0x1 { ",
+            "0x20: list[u32] = { 1, 2 }\n",
+            "0x21: string = \"a,b\"\n",
+            "} }\n",
+            "0x11: string = \"list2[pointer] = { 0x0 {}, 0x1 {} }\"\n",
+            "# list2[pointer] = { 0x0 {}, 0x1 {} }\n",
+        );
+        let normalized = remove_list2_pointer_commas(text);
+
+        assert!(normalized.contains("0x0 {}  0x1 {"));
+        assert!(normalized.contains("list[u32] = { 1, 2 }"));
+        assert!(normalized.contains(r#"string = "a,b""#));
+        assert!(normalized.contains(r#"string = "list2[pointer] = { 0x0 {}, 0x1 {} }""#));
+        assert!(normalized.contains("# list2[pointer] = { 0x0 {}, 0x1 {} }"));
+    }
+
+    #[test]
     fn parses_null_spellings_for_pointers_and_list2() {
         let canonical = Document::parse(
             "canonical.rito",
