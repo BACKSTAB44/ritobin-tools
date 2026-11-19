@@ -628,7 +628,7 @@ fn normalize_hash_padding(text: &str) -> String {
         }
 
         match byte {
-            b'"' | b'\\'' => {
+            b'"' | b'\'' => {
                 quote = Some(byte);
                 output.push(byte);
                 cursor += 1;
@@ -638,7 +638,7 @@ fn normalize_hash_padding(text: &str) -> String {
                     let current = bytes[cursor];
                     output.push(current);
                     cursor += 1;
-                    if matches!(current, b'\\n' | b'\\r') {
+                    if matches!(current, b'\n' | b'\r') {
                         break;
                     }
                 }
