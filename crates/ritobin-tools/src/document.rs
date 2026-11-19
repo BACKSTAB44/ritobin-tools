@@ -420,6 +420,9 @@ pub fn to_text(
 
     // Match Moonshadow's canonical zero-class pointer representation.
     text = print_null_literals_as_zero_struct(&text);
+    // The parser treats pointer-list elements as class blocks and does not consume commas
+    // after them. Separate list2[pointer] class items by whitespace instead.
+    text = remove_list2_pointer_commas(&text);
     // Keep the compact hexadecimal notation used by earlier ritobin-tools versions.
     text = normalize_hash_padding(&text);
 
@@ -597,6 +600,130 @@ fn normalize_null_literals(text: &str) -> String {
 /// Prints null pointer literals using the canonical zero-struct spelling.
 fn print_null_literals_as_zero_struct(text: &str) -> String {
     rewrite_null_literals(text, "0x0 {}")
+}
+
+/// Removes separators between top-level items in `list2[pointer]` values.
+///
+/// The parser handles a pointer element as a class block (`0xHASH { ... }`). Unlike its
+/// literal-item branch, the class-item branch does not consume a following comma. The printer
+/// can inline these lists with commas, so remove only commas at the list's outermost level.
+/// Commas in nested values, strings, and comments are preserved.
+fn remove_list2_pointer_commas(text: &str) -> String {
+    fn skip_quoted(bytes: &[u8], mut cursor: usize) -> usize {
+        let quote = bytes[cursor];
+        cursor += 1;
+        while cursor < bytes.len() {
+            if bytes[cursor] == b'\\' {
+                cursor = (cursor + 2).min(bytes.len());
+            } else if bytes[cursor] == quote {
+                return cursor + 1;
+            } else {
+                cursor += 1;
+            }
+        }
+        cursor
+    }
+
+    fn skip_comment(bytes: &[u8], mut cursor: usize) -> usize {
+        while cursor < bytes.len() && !matches!(bytes[cursor], b'\n' | b'\r') {
+            cursor += 1;
+        }
+        cursor
+    }
+
+    fn matching_brace(bytes: &[u8], open: usize) -> Option<usize> {
+        let mut depth = 0usize;
+        let mut cursor = open;
+        while cursor < bytes.len() {
+            match bytes[cursor] {
+                b'"' | b'\'' => cursor = skip_quoted(bytes, cursor),
+                b'#' => cursor = skip_comment(bytes, cursor),
+                b'{' => {
+                    depth += 1;
+                    cursor += 1;
+                }
+                b'}' => {
+                    depth = depth.checked_sub(1)?;
+                    if depth == 0 {
+                        return Some(cursor);
+                    }
+                    cursor += 1;
+                }
+                _ => cursor += 1,
+            }
+        }
+        None
+    }
+
+    let bytes = text.as_bytes();
+    let marker = b"list2[pointer]";
+    let mut ranges = Vec::new();
+    let mut cursor = 0usize;
+
+    // Find every list2[pointer] initializer, ignoring strings and comments. Continue scanning
+    // inside each initializer so nested list2[pointer] fields are found too.
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'"' | b'\'' => cursor = skip_quoted(bytes, cursor),
+            b'#' => cursor = skip_comment(bytes, cursor),
+            _ if bytes[cursor..].starts_with(marker) => {
+                let mut next = cursor + marker.len();
+                while next < bytes.len() && bytes[next].is_ascii_whitespace() {
+                    next += 1;
+                }
+                if next < bytes.len() && bytes[next] == b'=' {
+                    next += 1;
+                    while next < bytes.len() && bytes[next].is_ascii_whitespace() {
+                        next += 1;
+                    }
+                    if next < bytes.len() && bytes[next] == b'{' {
+                        if let Some(close) = matching_brace(bytes, next) {
+                            ranges.push((next, close));
+                        }
+                    }
+                }
+                cursor += marker.len();
+            }
+            _ => cursor += 1,
+        }
+    }
+
+    if ranges.is_empty() {
+        return text.to_owned();
+    }
+
+    let mut remove = vec![false; bytes.len()];
+    for (open, close) in ranges {
+        let mut depth = 1usize;
+        let mut cursor = open + 1;
+        while cursor < close {
+            match bytes[cursor] {
+                b'"' | b'\'' => cursor = skip_quoted(bytes, cursor),
+                b'#' => cursor = skip_comment(bytes, cursor),
+                b'{' => {
+                    depth += 1;
+                    cursor += 1;
+                }
+                b'}' => {
+                    depth = depth.saturating_sub(1);
+                    cursor += 1;
+                }
+                b',' if depth == 1 => {
+                    remove[cursor] = true;
+                    cursor += 1;
+                }
+                _ => cursor += 1,
+            }
+        }
+    }
+
+    let mut output = Vec::with_capacity(bytes.len());
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        if !remove[index] {
+            output.push(byte);
+        }
+    }
+    String::from_utf8(output).expect("removing ASCII commas preserves UTF-8")
 }
 
 /// Removes padding from 32-bit hexadecimal literals, matching the established ritobin text
